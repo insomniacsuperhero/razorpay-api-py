@@ -60,6 +60,17 @@ def exchange_link_token(db: Session, token: str) -> dict:
             "dispute_id": c["dispute_id"]}
 
 
+def issue_open_session() -> dict:
+    """Merchant session without an alert link (DEMO_OPEN_ACCESS=true): the app opens straight to Home."""
+    s = get_settings()
+    if not s.demo_open_access:
+        raise ProofBridgeError(AUTH_INVALID, "Open the secure link in your dispute alert to sign in.", 403)
+    exp = _now() + timedelta(minutes=s.access_token_minutes)
+    access = jwt.encode({"typ": "access", "sub": s.merchant_id, "dispute_id": "", "exp": int(exp.timestamp())},
+                        s.jwt_signing_secret, algorithm=ALG)
+    return {"access_token": access, "token_type": "bearer", "expires_at": exp.isoformat(), "dispute_id": None}
+
+
 class Principal:
     def __init__(self, merchant_id: str, dispute_id: str):
         self.merchant_id, self.dispute_id = merchant_id, dispute_id
@@ -97,4 +108,4 @@ def require_admin(x_demo_secret: str = Header(default="")) -> None:
 
 
 __all__ = ["issue_link_token", "exchange_link_token", "current_principal", "dispute_principal",
-           "merchant_principal", "require_admin", "Principal", "get_db"]
+           "issue_open_session", "merchant_principal", "require_admin", "Principal", "get_db"]

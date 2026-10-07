@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     # Merchant shown in the app (the standard Razorpay API has no merchant-profile endpoint)
     merchant_id: str = "merchant_demo"
     merchant_name: str = "Your business"
+    # Prototype only: let anyone who opens the app use this test merchant without an alert link
+    demo_open_access: bool = False
 
     # Dispute nudges: who gets them and through which channels
     notify_channels: str = "in_app,push,email,whatsapp"   # any of in_app, push, email, whatsapp

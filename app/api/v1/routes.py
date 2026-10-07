@@ -17,7 +17,8 @@ from app.schemas.api import (ActionRequiredIn, CompleteIn, ContestIn, DraftIn, E
                              MetricIn, PushSubscribeIn, PushUnsubscribeIn, ResolveIn, SeedIn, UploadIn)
 from app.security import hmac_verify
 from app.security.idempotency import run_idempotent
-from app.security.tokens import (Principal, dispute_principal, exchange_link_token, issue_link_token, merchant_principal,
+from app.security.tokens import (Principal, dispute_principal, exchange_link_token, issue_link_token, issue_open_session,
+                                 merchant_principal,
                                  require_admin)
 from app.services import disputes as dsvc
 from app.services import evidence as esvc
@@ -36,6 +37,12 @@ def exchange(body: ExchangeIn, db: Session = Depends(get_db)):
     out = exchange_link_token(db, body.token)
     metric(db, "link_opened", out["dispute_id"])
     return out
+
+
+@router.post("/sessions/open", tags=["sessions"])
+def open_session():
+    """Signs the app in as the demo merchant when DEMO_OPEN_ACCESS=true; 403 otherwise."""
+    return issue_open_session()
 
 
 # ---------- disputes ----------

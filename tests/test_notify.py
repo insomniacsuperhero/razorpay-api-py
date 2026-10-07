@@ -148,3 +148,18 @@ def test_web_push_reaches_subscribed_devices_and_drops_dead_ones(env):
     finally:
         _settings(**old)
         messaging.push_sender = messaging.PushSender()
+
+
+def test_open_session_only_when_enabled(env):
+    client, *_ = env
+    assert client.post("/api/v1/sessions/open").status_code == 403
+    old = _settings(demo_open_access=True)
+    try:
+        r = client.post("/api/v1/sessions/open")
+        assert r.status_code == 200 and r.json()["dispute_id"] is None
+        auth = {"Authorization": f"Bearer {r.json()['access_token']}"}
+        assert client.get("/api/v1/merchant/disputes", headers=auth).status_code == 200
+        did, _, _ = seed_and_login(client)
+        assert client.get(f"/api/v1/disputes/{did}", headers=auth).status_code == 200
+    finally:
+        _settings(**old)
