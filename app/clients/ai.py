@@ -1,0 +1,156 @@
+"""AI extraction. The model only reads files and suggests an evidence field.
+It never decides what is required, the verdict, or whether to submit (that is app/domain).
+
+Providers:
+  gemini - Gemini Flash, structured JSON output validated against EvidenceAI
+  fake   - deterministic regex/keyword extractor for local dev, tests and the labelled demo fallback
+Use synthetic or anonymised evidence on the Gemini free tier (free-tier content may be used by Google).
+"""
+import json
+import re
+from dataclasses import dataclass, field
+from typing import Literal
+
+from pydantic import BaseModel, Field, ValidationError
+
+from app.config import get_settings
+from app.domain.evidence_rules import ALL_FIELDS
+from app.errors import AI_ANALYSIS_FAILED, ProofBridgeError
+
+FieldName = Literal[
+    "shipping_proof", "billing_proof", "cancellation_proof", "customer_communication", "proof_of_service",
+    "explanation_letter", "refund_confirmation", "access_activity_log", "refund_cancellation_policy",
+    "term_and_conditions", "others", "none"]
+
+
+class EvidenceAI(BaseModel):
+    document_type: str = Field(description="Short plain label, e.g. 'Courier tracking screenshot', 'WhatsApp chat'")
+    suggested_field: FieldName = Field(description="Razorpay evidence field this file best fits, or 'none'")
+    field_confidence: Literal["high", "low"] = "high"
+    readable: bool = Field(description="False if blurry, cropped or key text cannot be read")
+    quality_issues: list[str] = Field(default_factory=list, description="e.g. 'delivery date cut off'")
+    tracking_id: str | None = None
+    courier: str | None = None
+    delivery_status: str | None = None
+    delivery_date: str | None = Field(None, description="ISO YYYY-MM-DD if visible")
+    amount_paise: int | None = Field(None, description="Amount shown, in paise (₹2,499 -> 249900)")
+    order_id: str | None = None
+    invoice_number: str | None = None
+    customer_name: str | None = None
+    contact_last4: str | None = Field(None, description="Last 4 digits of a phone number shown")
+    customer_quote: str | None = Field(None, description="Customer's own words confirming receipt etc., max 200 chars")
+    message_date: str | None = Field(None, description="ISO date of the quoted message if visible")
+    refund_reference: str | None = None
+    refund_date: str | None = None
+
+
+@dataclass
+class ExtractionInput:
+    filename: str
+    dispute_reason: str
+    images: list[tuple[bytes, str]] = field(default_factory=list)   # (bytes, mime) e.g. page renders
+    text: str | None = None
+
+
+PROMPT = """You are reading ONE file a merchant selected as evidence for a payment dispute.
+Dispute reason: {reason}.
+Extract only facts that are visibly present. Never guess or invent values; use null when not visible.
+Pick suggested_field from: {fields}, or 'none' if the file does not support any.
+Field guide: shipping_proof = courier/delivery proof; customer_communication = chats/emails with the customer;
+billing_proof = invoice/receipt; proof_of_service = product/packing photos or service completion;
+refund_confirmation = refund receipt; cancellation_proof = cancellation record;
+refund_cancellation_policy = policy text; others = anything relevant that fits nothing else.
+Set field_confidence to 'low' if unsure which field fits. Set readable=false if key text is unreadable.
+Amounts in paise (₹2,499 = 249900). Dates as YYYY-MM-DD.{text_block}"""
+
+
+class GeminiExtractor:
+    name = "gemini"
+
+    def __init__(self, api_key: str, model: str):
+        from google import genai
+        self._genai = genai
+        self.client = genai.Client(api_key=api_key)
+        self.model = model
+
+    def extract(self, inp: ExtractionInput) -> EvidenceAI:
+        from google.genai import types
+        text_block = f"\n\nExtracted document text (may be partial):\n{inp.text[:12000]}" if inp.text else ""
+        parts: list = [types.Part.from_bytes(data=b, mime_type=m) for b, m in inp.images[:5]]
+        parts.append(PROMPT.format(reason=inp.dispute_reason, fields=", ".join(ALL_FIELDS), text_block=text_block))
+        try:
+            res = self.client.models.generate_content(
+                model=self.model, contents=parts,
+                config=types.GenerateContentConfig(response_mime_type="application/json",
+                                                   response_schema=EvidenceAI, temperature=0))
+        except Exception as e:  # rate limits, network, safety blocks
+            raise ProofBridgeError(AI_ANALYSIS_FAILED, f"AI analysis failed: {e.__class__.__name__}", 502)
+        try:
+            if isinstance(res.parsed, EvidenceAI):
+                return res.parsed
+            return EvidenceAI.model_validate(json.loads(res.text or "{}"))
+        except (ValidationError, ValueError):
+            raise ProofBridgeError(AI_ANALYSIS_FAILED, "AI returned output that failed validation", 502)
+
+
+class FakeExtractor:
+    """Deterministic stand-in. Reads text (PDF/DOCX) with regexes and uses filename keywords for images.
+    Only for local development, tests and an explicitly labelled demo fallback."""
+    name = "fake"
+    _rx = {
+        "tracking_id": r"\b(?:AWB|Tracking(?: ID)?|Docket)[:#\s]*([A-Z0-9]{8,20})\b",
+        "order_id": r"\bOrder(?: ID| No\.?)?[:#\s]*([A-Z0-9-]{4,24})\b",
+        "invoice_number": r"\bInvoice(?: No\.?| #)?[:#\s]*([A-Z0-9/-]{3,24})\b",
+        "delivery_date": r"\bDelivered(?: on)?[:\s]*(\d{4}-\d{2}-\d{2})\b",
+        "refund_reference": r"\b(?:Refund (?:ID|Ref(?:erence)?))[:#\s]*([A-Za-z0-9_]{6,30})\b",
+    }
+
+    def extract(self, inp: ExtractionInput) -> EvidenceAI:
+        name, text = inp.filename.lower(), inp.text or ""
+        facts: dict = {k: (m.group(1) if (m := re.search(rx, text, re.I)) else None) for k, rx in self._rx.items()}
+        amt = re.search(r"(?:₹|Rs\.?|INR)\s?([\d,]+(?:\.\d{1,2})?)", text)
+        if amt:
+            facts["amount_paise"] = round(float(amt.group(1).replace(",", "")) * 100)
+        courier = re.search(r"\b(Delhivery|Blue ?Dart|DTDC|Ekart|Xpressbees|Shadowfax|India Post|Ecom Express)\b", text, re.I)
+        facts["courier"] = courier.group(1) if courier else None
+        quote = re.search(r"[\"“]([^\"”]{4,200})[\"”]", text)
+        facts["customer_quote"] = quote.group(1) if quote else None
+
+        def has(*words):
+            return any(w in name for w in words) or any(w in text.lower() for w in words)
+
+        if has("courier", "delivery", "delivered", "tracking", "awb", "shipment"):
+            fld, label = "shipping_proof", "Courier tracking proof"
+            facts["delivery_status"] = facts.get("delivery_status") or "Delivered"
+            if not text and not facts["tracking_id"]:      # image with a telling filename (demo)
+                facts.update(tracking_id="DL78421135", courier=facts["courier"] or "Delhivery")
+        elif has("whatsapp", "chat", "message", "received, thank"):
+            fld, label = "customer_communication", "Chat with the customer"
+            if not facts["customer_quote"] and not text:
+                facts["customer_quote"] = "Received, thank you!"
+        elif has("invoice", "bill", "receipt"):
+            fld, label = "billing_proof", "Invoice"
+        elif has("refund"):
+            fld, label = "refund_confirmation", "Refund confirmation"
+        elif has("policy", "terms"):
+            fld, label = "refund_cancellation_policy", "Store policy"
+        elif has("packing", "product", "photo", "item"):
+            fld, label = "proof_of_service", "Product or packing photo"
+        else:
+            fld, label = "none", "Unrecognised file"
+        unreadable = has("blurry", "blur", "unreadable")
+        return EvidenceAI(document_type=label, suggested_field=fld, readable=not unreadable,
+                          field_confidence="low" if fld == "none" else "high",
+                          quality_issues=["Image is blurry; key text can't be read"] if unreadable else [],
+                          **{k: v for k, v in facts.items() if v is not None})
+
+
+_extractor = None
+
+
+def get_extractor():
+    global _extractor
+    if _extractor is None:
+        s = get_settings()
+        _extractor = GeminiExtractor(s.gemini_api_key, s.gemini_model) if s.ai_provider == "gemini" else FakeExtractor()
+    return _extractor
