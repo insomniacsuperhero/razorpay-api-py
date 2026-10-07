@@ -243,3 +243,12 @@ def test_gemini_400_tries_simpler_modes_on_same_model(monkeypatch):
     g.client = SimpleNamespace(models=SimpleNamespace(generate_content=gen))
     g.extract(ExtractionInput("a.jpg", "x"))
     assert g.last_model_used == "m (prompt)" and modes == [True, True, False]
+
+
+def test_summary_only_says_invoice_attached_when_billing_proof_present():
+    ship = SimpleNamespace(verdict="strong", removed_at=None, document_type="Courier screenshot",
+                           final_field="shipping_proof", final_facts={"tracking_id": "T1", "invoice_number": "INV-1"})
+    assert "references invoice INV-1" in build_summary(CTX, NR.reason_label, [ship])
+    bill = SimpleNamespace(verdict="relevant", removed_at=None, document_type="Invoice",
+                           final_field="billing_proof", final_facts={"invoice_number": "INV-1"})
+    assert "Invoice INV-1 is attached" in build_summary(CTX, NR.reason_label, [ship, bill])

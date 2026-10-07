@@ -298,6 +298,8 @@ def test_stuck_card_becomes_retryable(env):
     it = db.get(EvidenceItem, uuid.UUID(card["id"]))
     it.status, it.updated_at = "analysing", datetime.now(timezone.utc) - timedelta(minutes=10)
     db.commit(); db.close()
+    cov = client.get(f"/api/v1/disputes/{did}/coverage", headers=auth).json()
+    assert card["id"] not in cov["processing"]          # coverage marks the stuck card too
     c = client.get(f"/api/v1/disputes/{did}/evidence/{card['id']}", headers=auth).json()
     assert c["status"] == "failed" and c["error"]["code"] == "PROCESSING_INTERRUPTED"
     assert client.post(f"/api/v1/disputes/{did}/evidence/{card['id']}/process", headers=auth).status_code == 202

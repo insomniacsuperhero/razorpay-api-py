@@ -34,9 +34,11 @@ def _mask_email(e: str | None) -> str | None:
 
 
 def active_items(db: Session, dispute_id: str) -> list[EvidenceItem]:
-    return list(db.scalars(select(EvidenceItem).where(EvidenceItem.dispute_id == dispute_id,
-                                                      EvidenceItem.removed_at.is_(None))
-                           .order_by(EvidenceItem.created_at)))
+    from app.services.evidence import mark_if_stale
+    items = db.scalars(select(EvidenceItem).where(EvidenceItem.dispute_id == dispute_id,
+                                                  EvidenceItem.removed_at.is_(None))
+                       .order_by(EvidenceItem.created_at))
+    return [mark_if_stale(db, i) for i in items]   # an interrupted card never blocks coverage/submit
 
 
 def dispute_summary(d: dict) -> dict:

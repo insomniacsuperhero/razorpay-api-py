@@ -38,7 +38,10 @@ def build_summary(ctx: PaymentContext, reason_label: str, items: list) -> str:
         parts.append(f"The customer wrote{when}: \"{f['customer_quote'][:200]}\".")
     if f.get("invoice_number"):
         amt = f" for {rupees(int(f['amount_paise']))}" if f.get("amount_paise") else ""
-        parts.append(f"Invoice {f['invoice_number']}{amt} is attached.")
+        # only claim an attached invoice when a billing document is actually in the pack
+        has_invoice_doc = any(i.final_field == "billing_proof" for i in useful if getattr(i, "final_field", None))
+        parts.append(f"Invoice {f['invoice_number']}{amt} is attached." if has_invoice_doc
+                     else f"The evidence references invoice {f['invoice_number']}{amt}.")
     if f.get("refund_reference"):
         when = f" on {_d(f['refund_date'])}" if _d(f.get("refund_date")) else ""
         parts.append(f"A refund was processed{when}, reference {f['refund_reference']}.")
