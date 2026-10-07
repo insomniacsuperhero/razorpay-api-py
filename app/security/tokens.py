@@ -81,7 +81,8 @@ def dispute_principal(dispute_id: str, p: Principal = Depends(current_principal)
 
 def require_admin(x_demo_secret: str = Header(default="")) -> None:
     import hmac
-    if not hmac.compare_digest(x_demo_secret.encode(), get_settings().demo_admin_secret.encode()):
+    expected = get_settings().demo_admin_secret
+    if not expected or not x_demo_secret or not hmac.compare_digest(x_demo_secret.encode(), expected.encode()):
         raise ProofBridgeError(AUTH_INVALID, "Admin secret required (X-Demo-Secret).", 401)
 
 

@@ -269,3 +269,11 @@ def test_metrics_recorded(env):
                        json={"event_name": "screen_2_enter"}).status_code == 204
     names = [m["event"] for m in client.get(f"/api/v1/demo/metrics/{did}", headers=ADMIN).json()]
     assert {"link_opened", "timer_started", "ui:screen_2_enter"} <= set(names)
+
+
+def test_empty_admin_secret_never_opens_demo_routes(env, monkeypatch):
+    client, *_ = env
+    from app.config import get_settings
+    monkeypatch.setattr(get_settings(), "demo_admin_secret", "")
+    assert client.post("/api/v1/demo/seed", json={}).status_code == 401
+    assert client.post("/api/v1/demo/seed", headers={"X-Demo-Secret": ""}, json={}).status_code == 401

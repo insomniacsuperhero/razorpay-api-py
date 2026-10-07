@@ -67,30 +67,74 @@ Amounts in paise (₹2,499 = 249900). Dates as YYYY-MM-DD.{text_block}"""
 class GeminiExtractor:
     name = "gemini"
 
-    def __init__(self, api_key: str, model: str):
+    def __init__(self, api_key: str, model: str, fallback_model: str = ""):
         from google import genai
         self._genai = genai
         self.client = genai.Client(api_key=api_key)
         self.model = model
+        self.fallback_model = fallback_model
+        self.last_model_used: str | None = None
+
+    @staticmethod
+    def _describe(e: Exception) -> str:
+        code = getattr(e, "code", None) or getattr(e, "status_code", None)
+        msg = str(getattr(e, "message", None) or e).replace("\n", " ")
+        return f"{e.__class__.__name__}{f' {code}' if code else ''}: {msg[:300]}"
+
+    @staticmethod
+    def _retryable(e: Exception) -> bool:
+        code = getattr(e, "code", None)
+        return e.__class__.__name__ == "ServerError" or code in (429, 500, 502, 503, 504) or isinstance(
+            e, (TimeoutError, ConnectionError))
+
+    def _config(self, mode: str):
+        from google.genai import types
+        common = dict(response_mime_type="application/json", temperature=0,
+                      automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
+        if mode == "schema":            # SDK converts the Pydantic model
+            return types.GenerateContentConfig(response_schema=EvidenceAI, **common)
+        if mode == "json_schema":       # plain JSON Schema; some models accept this when the above fails
+            return types.GenerateContentConfig(response_json_schema=EvidenceAI.model_json_schema(), **common)
+        return types.GenerateContentConfig(**common)   # JSON mode only; schema is in the prompt, Pydantic validates
 
     def extract(self, inp: ExtractionInput) -> EvidenceAI:
+        import logging
+        import time
         from google.genai import types
+        log = logging.getLogger("proofbridge.ai")
         text_block = f"\n\nExtracted document text (may be partial):\n{inp.text[:12000]}" if inp.text else ""
-        parts: list = [types.Part.from_bytes(data=b, mime_type=m) for b, m in inp.images[:5]]
-        parts.append(PROMPT.format(reason=inp.dispute_reason, fields=", ".join(ALL_FIELDS), text_block=text_block))
-        try:
-            res = self.client.models.generate_content(
-                model=self.model, contents=parts,
-                config=types.GenerateContentConfig(response_mime_type="application/json",
-                                                   response_schema=EvidenceAI, temperature=0))
-        except Exception as e:  # rate limits, network, safety blocks
-            raise ProofBridgeError(AI_ANALYSIS_FAILED, f"AI analysis failed: {e.__class__.__name__}", 502)
-        try:
-            if isinstance(res.parsed, EvidenceAI):
-                return res.parsed
-            return EvidenceAI.model_validate(json.loads(res.text or "{}"))
-        except (ValidationError, ValueError):
-            raise ProofBridgeError(AI_ANALYSIS_FAILED, "AI returned output that failed validation", 502)
+        prompt = PROMPT.format(reason=inp.dispute_reason, fields=", ".join(ALL_FIELDS), text_block=text_block)
+        images = [types.Part.from_bytes(data=b, mime_type=m) for b, m in inp.images[:5]]
+        schema_hint = "\n\nReturn ONLY a JSON object matching this JSON Schema:\n" + json.dumps(EvidenceAI.model_json_schema())
+
+        last_err = "no attempt made"
+        models = [m for m in (self.model, self.fallback_model) if m]
+        for model in models:
+            for mode in ("schema", "json_schema", "prompt"):
+                contents = images + [prompt + (schema_hint if mode == "prompt" else "")]
+                for attempt in range(2):          # one quick retry for transient 5xx / 429
+                    try:
+                        res = self.client.models.generate_content(model=model, contents=contents,
+                                                                  config=self._config(mode))
+                    except Exception as e:
+                        last_err = self._describe(e)
+                        log.warning("gemini %s mode=%s attempt=%d failed: %s", model, mode, attempt + 1, last_err)
+                        if self._retryable(e) and attempt == 0:
+                            time.sleep(1.5)
+                            continue
+                        if getattr(e, "code", None) in (401, 403):   # bad key: nothing else will work
+                            raise ProofBridgeError(AI_ANALYSIS_FAILED, f"AI analysis failed: {last_err}", 502)
+                        break                       # try the next mode / model
+                    try:
+                        out = res.parsed if isinstance(res.parsed, EvidenceAI) else \
+                            EvidenceAI.model_validate(json.loads(res.text or "{}"))
+                        self.last_model_used = f"{model} ({mode})"
+                        return out
+                    except (ValidationError, ValueError) as e:
+                        last_err = f"output failed validation: {str(e)[:200]}"
+                        log.warning("gemini %s mode=%s returned invalid JSON: %s", model, mode, last_err)
+                        break
+        raise ProofBridgeError(AI_ANALYSIS_FAILED, f"AI analysis failed: {last_err}", 502)
 
 
 class FakeExtractor:
@@ -152,5 +196,5 @@ def get_extractor():
     global _extractor
     if _extractor is None:
         s = get_settings()
-        _extractor = GeminiExtractor(s.gemini_api_key, s.gemini_model) if s.ai_provider == "gemini" else FakeExtractor()
+        _extractor = GeminiExtractor(s.gemini_api_key, s.gemini_model, s.gemini_fallback_model) if s.ai_provider == "gemini" else FakeExtractor()
     return _extractor

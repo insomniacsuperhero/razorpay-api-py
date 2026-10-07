@@ -100,7 +100,9 @@ def test_heic_gets_a_helpful_message():
     assert "HEIC" in e.value.message
 
 
-def test_gemini_extractor_parses_and_fails_safely():
+def test_gemini_extractor_parses_and_fails_safely(monkeypatch):
+    import time
+    monkeypatch.setattr(time, 'sleep', lambda s: None)
     from app.clients.ai import EvidenceAI, ExtractionInput, GeminiExtractor
 
     class Res:
@@ -146,3 +148,28 @@ def test_ai_failure_marks_card_failed_and_retry_works(env):
     assert r.status_code == 202
     card = client.get(f"/api/v1/disputes/{did}/evidence/{card['id']}", headers=auth).json()
     assert card["status"] == "ready" and card["verdict"] == "strong"
+
+
+def test_gemini_falls_back_to_second_model(monkeypatch):
+    import time
+    from app.clients.ai import ExtractionInput, GeminiExtractor
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    calls = []
+
+    class ServerError(Exception):
+        code = 503
+
+    class Res:
+        parsed = None
+        text = '{"document_type":"Courier screenshot","suggested_field":"shipping_proof","readable":true}'
+
+    def gen(model, contents, config):
+        calls.append(model)
+        if model == "main-model":
+            raise ServerError("overloaded")
+        return Res()
+    g = GeminiExtractor("k", "main-model", "backup-model")
+    g.client = SimpleNamespace(models=SimpleNamespace(generate_content=gen))
+    out = g.extract(ExtractionInput("a.jpg", "x"))
+    assert out.suggested_field == "shipping_proof" and calls[-1] == "backup-model"
+    assert g.last_model_used.startswith("backup-model")

@@ -125,3 +125,17 @@ INSERT INTO alembic_version (version_num) VALUES ('ade886fd8376') RETURNING alem
 
 COMMIT;
 
+
+-- Row level security on, no policies: Supabase Data API roles get no access; the backend (table owner) is unaffected.
+BEGIN;
+alter table public.dispute_runs enable row level security;
+alter table public.upload_sessions enable row level security;
+alter table public.evidence_items enable row level security;
+alter table public.merchant_edits enable row level security;
+alter table public.webhook_events enable row level security;
+alter table public.metric_events enable row level security;
+alter table public.link_tokens enable row level security;
+alter table public.idempotency_keys enable row level security;
+alter table public.alembic_version enable row level security;
+UPDATE alembic_version SET version_num='0002_enable_rls' WHERE version_num='ade886fd8376';
+COMMIT;

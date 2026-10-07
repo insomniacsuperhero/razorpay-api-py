@@ -54,7 +54,8 @@ class Settings(BaseSettings):
     # AI
     ai_provider: str = "fake"                # gemini | fake
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"   # set to the current Flash model in your account
+    gemini_model: str = "gemini-3.7-flash"   # set to the current Flash model in your account
+    gemini_fallback_model: str = ""           # optional, e.g. gemini-3.5-flash-lite; used if the main model errors
 
     @property
     def cors_origins(self) -> list[str]:
@@ -67,12 +68,16 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _check_production(self):
+        # An empty value in .env must not silently weaken signing (any environment)
+        if not self.jwt_signing_secret:
+            raise ValueError("JWT_SIGNING_SECRET is empty. Generate one: "
+                             "python -c \"import secrets;print(secrets.token_urlsafe(48))\"")
         if self.app_env != "production":
             return self
         missing = []
         if self.jwt_signing_secret.startswith("dev-only") or len(self.jwt_signing_secret) < 32:
             missing.append("JWT_SIGNING_SECRET (32+ random bytes)")
-        if self.demo_admin_secret == "dev-admin-secret":
+        if self.demo_admin_secret in ("", "dev-admin-secret"):
             missing.append("DEMO_ADMIN_SECRET")
         if self.database_url.startswith("sqlite"):
             missing.append("DATABASE_URL (Supabase)")

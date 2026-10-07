@@ -104,7 +104,7 @@ def _ai():
     ex = get_extractor()
     out = ex.extract(ExtractionInput("synthetic_courier.jpg", "Customer says the order never arrived",
                                      images=[(buf.getvalue(), "image/jpeg")]))
-    return f"[{ex.name}] {out.suggested_field} tracking={out.tracking_id} date={out.delivery_date} ({time.time() - t:.1f}s)"
+    return f"[{ex.name} {getattr(ex, 'last_model_used', '') or ''}] {out.suggested_field} tracking={out.tracking_id} date={out.delivery_date} ({time.time() - t:.1f}s)"
 
 
 ok = sum(r[0] for r in results)
