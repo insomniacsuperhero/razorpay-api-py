@@ -42,7 +42,7 @@ def _decode(token: str, typ: str) -> dict:
 
 
 def exchange_link_token(db: Session, token: str) -> dict:
-    c = _decode(token, "link")
+    c = _decode(token.strip().strip('"'), "link")   # tolerate copy-paste whitespace/quotes
     row = db.get(LinkToken, uuid.UUID(c["jti"]))
     if row is None or row.dispute_id != c["dispute_id"]:
         raise ProofBridgeError(AUTH_INVALID, "Unknown link.", 401)

@@ -277,3 +277,29 @@ def test_empty_admin_secret_never_opens_demo_routes(env, monkeypatch):
     monkeypatch.setattr(get_settings(), "demo_admin_secret", "")
     assert client.post("/api/v1/demo/seed", json={}).status_code == 401
     assert client.post("/api/v1/demo/seed", headers={"X-Demo-Secret": ""}, json={}).status_code == 401
+
+
+def test_exchange_tolerates_whitespace(env):
+    client, *_ = env
+    r = client.post("/api/v1/demo/seed", headers=ADMIN, json={"payment_id": "pay_TEST001"})
+    tok = r.json()["token"]
+    r = client.post("/api/v1/sessions/exchange", json={"token": f"  {tok}\n"})
+    assert r.status_code == 200 and r.json()["access_token"]
+
+
+def test_stuck_card_becomes_retryable(env):
+    from datetime import datetime, timedelta, timezone
+    from app.db.models import EvidenceItem
+    from app.db.session import SessionLocal
+    client, *_ = env
+    did, auth, _ = seed_and_login(client)
+    card = upload(client, did, auth, "courier_tracking.jpg", samples.jpeg(), "image/jpeg")
+    db = SessionLocal()
+    it = db.get(EvidenceItem, uuid.UUID(card["id"]))
+    it.status, it.updated_at = "analysing", datetime.now(timezone.utc) - timedelta(minutes=10)
+    db.commit(); db.close()
+    c = client.get(f"/api/v1/disputes/{did}/evidence/{card['id']}", headers=auth).json()
+    assert c["status"] == "failed" and c["error"]["code"] == "PROCESSING_INTERRUPTED"
+    assert client.post(f"/api/v1/disputes/{did}/evidence/{card['id']}/process", headers=auth).status_code == 202
+    c = client.get(f"/api/v1/disputes/{did}/evidence/{card['id']}", headers=auth).json()
+    assert c["status"] == "ready"

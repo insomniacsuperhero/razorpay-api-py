@@ -173,3 +173,27 @@ def test_gemini_falls_back_to_second_model(monkeypatch):
     out = g.extract(ExtractionInput("a.jpg", "x"))
     assert out.suggested_field == "shipping_proof" and calls[-1] == "backup-model"
     assert g.last_model_used.startswith("backup-model")
+
+
+def test_gemini_404_skips_to_fallback(monkeypatch):
+    import time
+    from app.clients.ai import ExtractionInput, GeminiExtractor
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    calls = []
+
+    class ClientError(Exception):
+        code = 404
+
+    class Res:
+        parsed = None
+        text = '{"document_type":"x","suggested_field":"shipping_proof","readable":true}'
+
+    def gen(model, contents, config):
+        calls.append(model)
+        if model == "retired":
+            raise ClientError("no longer available")
+        return Res()
+    g = GeminiExtractor("k", "retired", "backup")
+    g.client = SimpleNamespace(models=SimpleNamespace(generate_content=gen))
+    g.extract(ExtractionInput("a.jpg", "x"))
+    assert calls == ["retired", "backup"]

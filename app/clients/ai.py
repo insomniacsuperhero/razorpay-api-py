@@ -67,10 +67,14 @@ Amounts in paise (₹2,499 = 249900). Dates as YYYY-MM-DD.{text_block}"""
 class GeminiExtractor:
     name = "gemini"
 
+    CALL_TIMEOUT_MS = 30_000     # one Gemini request
+    TOTAL_BUDGET_S = 75          # all retries/fallbacks for one file; keeps a card from spinning forever
+
     def __init__(self, api_key: str, model: str, fallback_model: str = ""):
         from google import genai
+        from google.genai import types
         self._genai = genai
-        self.client = genai.Client(api_key=api_key)
+        self.client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=self.CALL_TIMEOUT_MS))
         self.model = model
         self.fallback_model = fallback_model
         self.last_model_used: str | None = None
@@ -108,11 +112,17 @@ class GeminiExtractor:
         schema_hint = "\n\nReturn ONLY a JSON object matching this JSON Schema:\n" + json.dumps(EvidenceAI.model_json_schema())
 
         last_err = "no attempt made"
+        started = time.monotonic()
         models = [m for m in (self.model, self.fallback_model) if m]
         for model in models:
+            model_missing = False
             for mode in ("schema", "json_schema", "prompt"):
+                if model_missing:
+                    break
                 contents = images + [prompt + (schema_hint if mode == "prompt" else "")]
                 for attempt in range(2):          # one quick retry for transient 5xx / 429
+                    if time.monotonic() - started > self.TOTAL_BUDGET_S:
+                        raise ProofBridgeError(AI_ANALYSIS_FAILED, f"AI analysis timed out; last error: {last_err}", 504)
                     try:
                         res = self.client.models.generate_content(model=model, contents=contents,
                                                                   config=self._config(mode))
@@ -124,6 +134,8 @@ class GeminiExtractor:
                             continue
                         if getattr(e, "code", None) in (401, 403):   # bad key: nothing else will work
                             raise ProofBridgeError(AI_ANALYSIS_FAILED, f"AI analysis failed: {last_err}", 502)
+                        if getattr(e, "code", None) == 404:          # model unavailable: go to the fallback
+                            model_missing = True
                         break                       # try the next mode / model
                     try:
                         out = res.parsed if isinstance(res.parsed, EvidenceAI) else \

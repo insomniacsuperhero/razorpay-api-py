@@ -38,6 +38,23 @@ def _now():
     return datetime.now(timezone.utc)
 
 
+IN_PROGRESS = {"queued", "extracting", "analysing", "validating", "uploading"}
+STALE_AFTER_SECONDS = 150
+
+
+def mark_if_stale(db: Session, item: EvidenceItem) -> EvidenceItem:
+    """A background task dies if the server restarts or redeploys mid-file. Don't leave the card spinning."""
+    if item.status not in IN_PROGRESS or item.updated_at is None:
+        return item
+    updated = item.updated_at if item.updated_at.tzinfo else item.updated_at.replace(tzinfo=timezone.utc)
+    if (_now() - updated).total_seconds() > STALE_AFTER_SECONDS:
+        item.status, item.error_code = "failed", "PROCESSING_INTERRUPTED"
+        item.processing_notes = [*(item.processing_notes or []),
+                                 "Processing was interrupted (the server restarted). Tap retry."]
+        db.commit()
+    return item
+
+
 def get_item(db: Session, dispute_id: str, evidence_id: str) -> EvidenceItem:
     try:
         item = db.get(EvidenceItem, uuid.UUID(str(evidence_id)))
@@ -45,7 +62,7 @@ def get_item(db: Session, dispute_id: str, evidence_id: str) -> EvidenceItem:
         item = None
     if item is None or item.dispute_id != dispute_id:
         raise ProofBridgeError(NOT_FOUND, "Evidence not found", 404)
-    return item
+    return mark_if_stale(db, item)
 
 
 # ---------- evaluation + Razorpay upload ----------
