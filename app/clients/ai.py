@@ -69,6 +69,7 @@ class GeminiExtractor:
 
     CALL_TIMEOUT_MS = 30_000     # one Gemini request
     TOTAL_BUDGET_S = 75          # all retries/fallbacks for one file; keeps a card from spinning forever
+    PRIMARY_SHARE_S = 35         # the main model must answer within this, else the fallback takes over
 
     def __init__(self, api_key: str, model: str, fallback_model: str = ""):
         from google import genai
@@ -114,33 +115,45 @@ class GeminiExtractor:
         last_err = "no attempt made"
         started = time.monotonic()
         models = [m for m in (self.model, self.fallback_model) if m]
-        for model in models:
-            model_missing = False
+        for idx, model in enumerate(models):
+            is_last = idx == len(models) - 1
+            # the main model gets a capped share of the budget so the fallback always gets a turn
+            model_deadline = started + (self.TOTAL_BUDGET_S if is_last else self.PRIMARY_SHARE_S)
+            next_model = False
             for mode in ("schema", "json_schema", "prompt"):
-                if model_missing:
+                if next_model:
                     break
                 contents = images + [prompt + (schema_hint if mode == "prompt" else "")]
-                for attempt in range(2):          # one quick retry for transient 5xx / 429
-                    if time.monotonic() - started > self.TOTAL_BUDGET_S:
+                for attempt in range(2):          # one quick retry for a transient 5xx / 429
+                    now = time.monotonic()
+                    if now - started > self.TOTAL_BUDGET_S:
                         raise ProofBridgeError(AI_ANALYSIS_FAILED, f"AI analysis timed out; last error: {last_err}", 504)
+                    if now > model_deadline:
+                        next_model = True
+                        break
                     try:
                         res = self.client.models.generate_content(model=model, contents=contents,
                                                                   config=self._config(mode))
                     except Exception as e:
                         last_err = self._describe(e)
+                        code = getattr(e, "code", None)
                         log.warning("gemini %s mode=%s attempt=%d failed: %s", model, mode, attempt + 1, last_err)
-                        if self._retryable(e) and attempt == 0:
-                            time.sleep(1.5)
-                            continue
-                        if getattr(e, "code", None) in (401, 403):   # bad key: nothing else will work
+                        if code in (401, 403):                 # bad key: nothing else will work
                             raise ProofBridgeError(AI_ANALYSIS_FAILED, f"AI analysis failed: {last_err}", 502)
-                        if getattr(e, "code", None) == 404:          # model unavailable: go to the fallback
-                            model_missing = True
-                        break                       # try the next mode / model
+                        if self._retryable(e):
+                            if attempt == 0 and not (not is_last and time.monotonic() + 1.5 > model_deadline):
+                                time.sleep(1.5)
+                                continue
+                            next_model = True                  # overloaded / rate limited: go to the fallback
+                        elif code == 404:
+                            next_model = True                  # model retired or unknown: go to the fallback
+                        break                                  # otherwise (e.g. 400 schema rejected): next mode
                     try:
                         out = res.parsed if isinstance(res.parsed, EvidenceAI) else \
                             EvidenceAI.model_validate(json.loads(res.text or "{}"))
                         self.last_model_used = f"{model} ({mode})"
+                        if idx > 0:
+                            log.info("gemini fallback %s answered after %s failed", model, self.model)
                         return out
                     except (ValidationError, ValueError) as e:
                         last_err = f"output failed validation: {str(e)[:200]}"

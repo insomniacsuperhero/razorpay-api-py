@@ -197,3 +197,49 @@ def test_gemini_404_skips_to_fallback(monkeypatch):
     g.client = SimpleNamespace(models=SimpleNamespace(generate_content=gen))
     g.extract(ExtractionInput("a.jpg", "x"))
     assert calls == ["retired", "backup"]
+
+
+def test_gemini_503_goes_to_fallback_after_one_retry(monkeypatch):
+    import time
+    from app.clients.ai import ExtractionInput, GeminiExtractor
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    calls = []
+
+    class ServerError(Exception):
+        code = 503
+
+    class Res:
+        parsed = None
+        text = '{"document_type":"x","suggested_field":"shipping_proof","readable":true}'
+
+    def gen(model, contents, config):
+        calls.append(model)
+        if model == "busy":
+            raise ServerError("high demand")
+        return Res()
+    g = GeminiExtractor("k", "busy", "backup")
+    g.client = SimpleNamespace(models=SimpleNamespace(generate_content=gen))
+    g.extract(ExtractionInput("a.jpg", "x"))
+    assert calls == ["busy", "busy", "backup"], calls   # one retry, no schema-mode churn, then fallback
+
+
+def test_gemini_400_tries_simpler_modes_on_same_model(monkeypatch):
+    from app.clients.ai import ExtractionInput, GeminiExtractor
+    modes = []
+
+    class ClientError(Exception):
+        code = 400
+
+    class Res:
+        parsed = None
+        text = '{"document_type":"x","suggested_field":"shipping_proof","readable":true}'
+
+    def gen(model, contents, config):
+        modes.append(bool(getattr(config, "response_schema", None)) or bool(getattr(config, "response_json_schema", None)))
+        if len(modes) < 3:
+            raise ClientError("schema not supported")
+        return Res()
+    g = GeminiExtractor("k", "m", "")
+    g.client = SimpleNamespace(models=SimpleNamespace(generate_content=gen))
+    g.extract(ExtractionInput("a.jpg", "x"))
+    assert g.last_model_used == "m (prompt)" and modes == [True, True, False]
