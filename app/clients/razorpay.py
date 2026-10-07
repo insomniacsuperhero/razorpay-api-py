@@ -32,6 +32,20 @@ class RazorpayClient:
     def fetch_order(self, order_id: str) -> dict:
         return self._request("GET", f"/orders/{order_id}")
 
+    # --- merchant app screens (Home, Payments, Settlements, Products) ---
+    def list_payments(self, from_ts: int, to_ts: int, count: int = 100, skip: int = 0) -> list[dict]:
+        return self._request("GET", "/payments", params={"from": from_ts, "to": to_ts, "count": count,
+                                                         "skip": skip}).get("items", [])
+
+    def list_settlements(self, from_ts: int, to_ts: int, count: int = 50) -> list[dict]:
+        return self._request("GET", "/settlements", params={"from": from_ts, "to": to_ts, "count": count}).get("items", [])
+
+    def list_payment_links(self) -> list[dict]:
+        return self._request("GET", "/payment_links").get("payment_links", [])
+
+    def list_invoices(self, count: int = 20) -> list[dict]:
+        return self._request("GET", "/invoices", params={"count": count}).get("items", [])
+
     # --- demo setup ---
     def create_payment_link(self, amount_paise: int, description: str, notes: dict | None = None) -> dict:
         return self._request("POST", "/payment_links", json={

@@ -57,6 +57,27 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.7-flash"   # set to the current Flash model in your account
     gemini_fallback_model: str = ""           # optional, e.g. gemini-3.5-flash-lite; used if the main model errors
 
+    # Merchant shown in the app (the standard Razorpay API has no merchant-profile endpoint)
+    merchant_id: str = "merchant_demo"
+    merchant_name: str = "Your business"
+
+    # Dispute nudges: who gets them and through which channels
+    notify_channels: str = "in_app,push,email,whatsapp"   # any of in_app, push, email, whatsapp
+    alert_link_minutes: int = 1440                   # alert links stay valid 24 h (still single use)
+    reminder_hours: str = "24,6"                     # reminders before the deadline if no response yet
+    merchant_email: str = ""
+    merchant_whatsapp: str = ""                      # E.164 digits, e.g. 919812345678
+    resend_api_key: str = ""
+    notify_email_from: str = "Razorpay Disputes <onboarding@resend.dev>"
+    whatsapp_token: str = ""
+    whatsapp_phone_number_id: str = ""
+    whatsapp_template: str = ""                      # approved template; empty = free-form text (24 h window)
+    whatsapp_template_lang: str = "en"
+    # Web Push to the installed app (generate once: python scripts/vapid_keys.py)
+    vapid_public_key: str = ""
+    vapid_private_key: str = ""
+    vapid_subject: str = "mailto:disputes@example.com"
+
     @property
     def cors_origins(self) -> list[str]:
         extra = [o.strip() for o in self.extra_cors_origins.split(",") if o.strip()]

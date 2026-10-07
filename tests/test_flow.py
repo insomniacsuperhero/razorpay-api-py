@@ -21,8 +21,13 @@ def test_link_token_is_single_use_and_scoped(env):
     r = client.post("/api/v1/sessions/exchange", json={"token": seeded["token"]})
     assert r.status_code == 401 and r.json()["error"]["code"] == "AUTH_EXPIRED"
     other, _, _ = seed_and_login(client)
-    r = client.get(f"/api/v1/disputes/{other}", headers=auth)
-    assert r.status_code == 403
+    r = client.get(f"/api/v1/disputes/{other}", headers=auth)      # the app session is the merchant's
+    assert r.status_code == 200
+    from jose import jwt
+    foreign = jwt.encode({"typ": "access", "sub": "someone_else", "dispute_id": did, "exp": 9999999999},
+                         "dev-only-change-me-dev-only-change-me", algorithm="HS256")
+    r = client.get(f"/api/v1/disputes/{did}", headers={"Authorization": f"Bearer {foreign}"})
+    assert r.status_code in (401, 403)
     r = client.get(f"/api/v1/disputes/{did}")
     assert r.status_code == 401
     assert seeded["link"].startswith("http://localhost:5173/d/")

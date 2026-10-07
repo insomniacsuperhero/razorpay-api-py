@@ -57,6 +57,9 @@ class HttpDisputeProvider:
     def accept(self, dispute_id: str) -> dict:
         return self._call("POST", f"/v1/disputes/{dispute_id}/accept")
 
+    def list(self, count: int = 50) -> list[dict]:
+        return self._call("GET", "/v1/disputes", params={"count": count}).get("items", [])
+
 
 class MockDisputeProvider(HttpDisputeProvider):
     """Adds the mock-only routes from razorpay-mock-disputes (demo setup and side paths)."""

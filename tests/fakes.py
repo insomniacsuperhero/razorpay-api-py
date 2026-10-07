@@ -19,6 +19,15 @@ class FakeRazorpay:
     def handler(self, req: httpx.Request) -> httpx.Response:
         path, m = req.url.path.removeprefix("/v1"), req.method
         self.calls.append(f"{m} {path}")
+        if m == "GET" and path == "/payments":
+            return httpx.Response(200, json={"entity": "collection", "items": sorted(self.payments.values(), key=lambda p: -p["created_at"])})
+        if m == "GET" and path == "/settlements":
+            return httpx.Response(200, json={"entity": "collection", "items": []})
+        if m == "GET" and path == "/payment_links":
+            return httpx.Response(200, json={"payment_links": [{"id": "plink_1", "amount": 249900, "status": "paid",
+                                                                "description": "Kurta", "short_url": "https://rzp.io/i/x"}]})
+        if m == "GET" and path == "/invoices":
+            return httpx.Response(200, json={"entity": "collection", "items": []})
         if m == "GET" and path.startswith("/payments/"):
             p = self.payments.get(path.split("/")[2])
             return httpx.Response(200, json=p) if p else httpx.Response(400, json={"error": {"description": "The id provided does not exist"}})
@@ -63,6 +72,9 @@ class FakeMockDisputes:
                               "submitted_at": None}, "_mock": {}}
             self.disputes[d["id"]] = d
             return httpx.Response(200, json=d)
+        if m == "GET" and p == "/v1/disputes":
+            items = sorted(self.disputes.values(), key=lambda d: -d["created_at"])
+            return httpx.Response(200, json={"entity": "collection", "count": len(items), "items": items})
         parts = p.strip("/").split("/")
         d = self.disputes.get(parts[2]) if len(parts) > 2 else None
         if d is None:

@@ -61,3 +61,17 @@ class ActionRequiredIn(BaseModel):
 
 class ResolveIn(BaseModel):
     outcome: Literal["won", "lost"]
+
+
+class PushKeys(BaseModel):
+    p256dh: str = Field(max_length=200)
+    auth: str = Field(max_length=100)
+
+
+class PushSubscribeIn(BaseModel):
+    endpoint: str = Field(max_length=1000)
+    keys: PushKeys
+
+
+class PushUnsubscribeIn(BaseModel):
+    endpoint: str = Field(max_length=1000)

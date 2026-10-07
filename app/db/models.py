@@ -3,7 +3,7 @@ Types work on Postgres (JSONB, UUID, timestamptz) and on SQLite for local tests.
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, BigInteger, DateTime, ForeignKey, Integer, String, Text, Uuid
+from sqlalchemy import UniqueConstraint, JSON, BigInteger, DateTime, ForeignKey, Integer, String, Text, Uuid
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -129,4 +129,34 @@ class IdempotencyKey(Base):
     request_hash: Mapped[str] = mapped_column(Text)
     status_code: Mapped[int] = mapped_column(Integer)
     response: Mapped[dict] = mapped_column(JsonType)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Notification(Base):
+    """Every dispute nudge sent to the merchant, one row per (dispute, kind, channel) so nothing is sent twice.
+    The alert link is never stored: it carries a single-use token."""
+    __tablename__ = "notifications"
+    __table_args__ = (UniqueConstraint("dispute_id", "kind", "channel", name="uq_notification_once"),)
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    dispute_id: Mapped[str] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(String(32))        # dispute_created | action_required | reminder_24h | reminder_6h | resolved
+    channel: Mapped[str] = mapped_column(String(16))     # in_app | email | whatsapp
+    status: Mapped[str] = mapped_column(String(16))      # sent | failed | skipped
+    title: Mapped[str] = mapped_column(Text)
+    body: Mapped[str] = mapped_column(Text)
+    recipient: Mapped[str | None] = mapped_column(Text)  # masked
+    detail: Mapped[str | None] = mapped_column(Text)     # provider message id or error
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PushSubscription(Base):
+    """A browser/PWA Web Push endpoint for the merchant (one per installed device)."""
+    __tablename__ = "push_subscriptions"
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    merchant_id: Mapped[str] = mapped_column(Text)
+    endpoint: Mapped[str] = mapped_column(Text, unique=True)
+    p256dh: Mapped[str] = mapped_column(Text)
+    auth: Mapped[str] = mapped_column(Text)
+    user_agent: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

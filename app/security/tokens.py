@@ -19,9 +19,11 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def issue_link_token(db: Session, dispute_id: str, merchant_id: str = "merchant_demo") -> tuple[str, datetime]:
+def issue_link_token(db: Session, dispute_id: str, merchant_id: str | None = None,
+                     minutes: int | None = None) -> tuple[str, datetime]:
     s = get_settings()
-    jti, exp = uuid.uuid4(), _now() + timedelta(minutes=s.link_token_minutes)
+    merchant_id = merchant_id or s.merchant_id
+    jti, exp = uuid.uuid4(), _now() + timedelta(minutes=minutes or s.link_token_minutes)
     db.add(LinkToken(jti=jti, dispute_id=dispute_id, merchant_id=merchant_id, expires_at=exp))
     db.commit()
     token = jwt.encode({"typ": "link", "sub": merchant_id, "dispute_id": dispute_id, "jti": str(jti),
@@ -63,8 +65,10 @@ class Principal:
         self.merchant_id, self.dispute_id = merchant_id, dispute_id
 
     def require(self, dispute_id: str) -> None:
-        if dispute_id != self.dispute_id:
-            raise ProofBridgeError(AUTH_INVALID, "This session is for a different dispute.", 403)
+        """The session is the merchant's app session: it opens any dispute on this merchant's account.
+        The prototype runs one Razorpay test account, so every dispute belongs to settings.merchant_id."""
+        if self.merchant_id != get_settings().merchant_id:
+            raise ProofBridgeError(AUTH_INVALID, "This session is for a different merchant.", 403)
 
 
 def current_principal(authorization: str = Header(default="")) -> Principal:
@@ -79,6 +83,12 @@ def dispute_principal(dispute_id: str, p: Principal = Depends(current_principal)
     return p
 
 
+def merchant_principal(p: Principal = Depends(current_principal)) -> Principal:
+    if p.merchant_id != get_settings().merchant_id:
+        raise ProofBridgeError(AUTH_INVALID, "This session is for a different merchant.", 403)
+    return p
+
+
 def require_admin(x_demo_secret: str = Header(default="")) -> None:
     import hmac
     expected = get_settings().demo_admin_secret
@@ -87,4 +97,4 @@ def require_admin(x_demo_secret: str = Header(default="")) -> None:
 
 
 __all__ = ["issue_link_token", "exchange_link_token", "current_principal", "dispute_principal",
-           "require_admin", "Principal", "get_db"]
+           "merchant_principal", "require_admin", "Principal", "get_db"]

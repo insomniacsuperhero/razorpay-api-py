@@ -6,17 +6,24 @@ from sqlalchemy.orm import Session
 from app.clients.disputes import MockDisputeProvider, get_dispute_provider
 from app.clients.storage import LocalStorage, get_storage
 from app.config import get_settings
-from app.db.models import MetricEvent
+from datetime import datetime, timezone
+
+from sqlalchemy import select
+
+from app.db.models import MetricEvent, Notification, PushSubscription
 from app.db.session import get_db
 from app.errors import AUTH_INVALID, NOT_FOUND, VALIDATION_FAILED, ProofBridgeError
 from app.schemas.api import (ActionRequiredIn, CompleteIn, ContestIn, DraftIn, EvidencePatch, ExchangeIn,
-                             MetricIn, ResolveIn, SeedIn, UploadIn)
+                             MetricIn, PushSubscribeIn, PushUnsubscribeIn, ResolveIn, SeedIn, UploadIn)
 from app.security import hmac_verify
 from app.security.idempotency import run_idempotent
-from app.security.tokens import Principal, dispute_principal, exchange_link_token, issue_link_token, require_admin
+from app.security.tokens import (Principal, dispute_principal, exchange_link_token, issue_link_token, merchant_principal,
+                                 require_admin)
 from app.services import disputes as dsvc
 from app.services import evidence as esvc
 from app.services import uploads as usvc
+from app.services import merchant as msvc
+from app.services import notify as nsvc
 from app.services import webhooks as wsvc
 from app.services.context import load_context, metric
 
@@ -139,13 +146,108 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
 
 
 @router.post("/webhooks/disputes", tags=["webhooks"])
-async def disputes_webhook(request: Request, db: Session = Depends(get_db)):
+async def disputes_webhook(request: Request, bg: BackgroundTasks, db: Session = Depends(get_db)):
     body = await request.body()
     hmac_verify.verify(body, request.headers.get("x-razorpay-signature"), get_settings().mock_disputes_webhook_secret)
     event = wsvc.parse(body)
     if not wsvc.record_once(db, "disputes", request.headers.get("x-razorpay-event-id"), body, event.get("event", "")):
         return {"duplicate": True}
-    return wsvc.handle_dispute(db, event)
+    out = wsvc.handle_dispute(db, event)
+    entity = (((event.get("payload") or {}).get("dispute")) or {}).get("entity") or {}
+    if entity.get("id"):
+        msvc.clear_cache()
+        bg.add_task(nsvc.run_in_background, event.get("event", ""), entity)   # nudge after replying to the webhook
+    return out
+
+
+# ---------- merchant app tabs (any valid app session) ----------
+merchant = APIRouter(prefix="/merchant", tags=["merchant"], dependencies=[Depends(merchant_principal)])
+
+
+@merchant.get("/profile")
+def merchant_profile():
+    return msvc.profile()
+
+
+@merchant.get("/overview")
+def merchant_overview(db: Session = Depends(get_db)):
+    return msvc.overview(db)
+
+
+@merchant.get("/payments")
+def merchant_payments(days: int = 7, count: int = 50, q: str = ""):
+    return msvc.payments(max(1, min(days, 90)), max(1, min(count, 100)), q)
+
+
+@merchant.get("/payments/{payment_id}")
+def merchant_payment(payment_id: str):
+    return msvc.payment_detail(payment_id)
+
+
+@merchant.get("/settlements")
+def merchant_settlements(days: int = 7):
+    return msvc.settlements(max(1, min(days, 90)))
+
+
+@merchant.get("/products")
+def merchant_products():
+    return msvc.products()
+
+
+@merchant.get("/disputes")
+def merchant_disputes(db: Session = Depends(get_db)):
+    return msvc.disputes_list(db)
+
+
+@merchant.get("/notifications")
+def merchant_notifications(limit: int = 50, db: Session = Depends(get_db)):
+    rows = db.scalars(select(Notification).order_by(Notification.created_at.desc()).limit(max(1, min(limit, 200))))
+    items = [nsvc.serialize(n) for n in rows]
+    return {"items": items, "unread": sum(1 for n in items if n["channel"] == "in_app" and not n["read"])}
+
+
+@merchant.post("/notifications/read", status_code=204)
+def merchant_notifications_read(db: Session = Depends(get_db)):
+    for n in db.scalars(select(Notification).where(Notification.channel == "in_app", Notification.read_at.is_(None))):
+        n.read_at = datetime.now(timezone.utc)
+    db.commit()
+    return Response(status_code=204)
+
+
+@merchant.get("/push/key")
+def push_key():
+    """The VAPID public key the app needs to subscribe; null when phone notifications aren't set up."""
+    return {"public_key": get_settings().vapid_public_key or None}
+
+
+@merchant.post("/push/subscribe", status_code=201)
+def push_subscribe(body: PushSubscribeIn, request: Request, p: Principal = Depends(merchant_principal),
+                   db: Session = Depends(get_db)):
+    if not body.endpoint.startswith("https://"):
+        raise ProofBridgeError(VALIDATION_FAILED, "Push endpoint must be https", 422)
+    row = db.scalar(select(PushSubscription).where(PushSubscription.endpoint == body.endpoint))
+    if row is None:
+        row = PushSubscription(endpoint=body.endpoint)
+        db.add(row)
+    row.merchant_id, row.p256dh, row.auth = p.merchant_id, body.keys.p256dh, body.keys.auth
+    row.user_agent = (request.headers.get("user-agent") or "")[:300]
+    db.commit()
+    return {"subscribed": True}
+
+
+@merchant.post("/push/unsubscribe", status_code=204)
+def push_unsubscribe(body: PushUnsubscribeIn, db: Session = Depends(get_db)):
+    row = db.scalar(select(PushSubscription).where(PushSubscription.endpoint == body.endpoint))
+    if row is not None:
+        db.delete(row)
+        db.commit()
+    return Response(status_code=204)
+
+
+# ---------- reminders (call from a cron every 15–30 min with X-Demo-Secret) ----------
+@router.post("/notifications/sweep", tags=["notifications"], dependencies=[Depends(require_admin)])
+def notifications_sweep(db: Session = Depends(get_db)):
+    return nsvc.sweep(db)
 
 
 # ---------- demo (admin secret) ----------
@@ -172,7 +274,7 @@ def demo_link(dispute_id: str, db: Session = Depends(get_db)):
 
 
 @demo.post("/seed")
-def demo_seed(body: SeedIn, db: Session = Depends(get_db)):
+def demo_seed(body: SeedIn, bg: BackgroundTasks, db: Session = Depends(get_db)):
     """Create a fresh mock dispute on a real captured test payment and return its alert link."""
     pid = body.payment_id
     if not pid:
@@ -183,7 +285,16 @@ def demo_seed(body: SeedIn, db: Session = Depends(get_db)):
         raise ProofBridgeError(VALIDATION_FAILED, "Pass payment_id (a captured rzp test payment).", 422)
     d = _mock().create(pid, body.reason_code, body.respond_in_hours, body.amount)
     dsvc.reset_local(db, d["id"])
+    msvc.clear_cache()
+    # the alert also goes out without the mock's webhook; the webhook path dedupes against this one
+    bg.add_task(nsvc.run_in_background, "seed", d)
     return {"dispute": dsvc.dispute_summary(d), **_link(db, d["id"])}
+
+
+@demo.post("/disputes/{dispute_id}/nudge")
+def demo_nudge(dispute_id: str, kind: str = "dispute_created", db: Session = Depends(get_db)):
+    """Send (or resend failed/skipped channels of) one nudge now and return what each channel did."""
+    return {"dispute_id": dispute_id, "kind": kind, "results": nsvc.nudge(db, get_dispute_provider().fetch(dispute_id), kind)}
 
 
 @demo.post("/reset/{dispute_id}")
@@ -244,4 +355,5 @@ def dev_get(key: str, exp: int, sig: str):
 
 
 router.include_router(demo)
+router.include_router(merchant)
 router.include_router(dev_storage)
