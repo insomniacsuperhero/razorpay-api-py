@@ -109,6 +109,14 @@ def overview(db: Session) -> dict:
         stl = _cached("overview:settlements", 60, lambda: get_razorpay().list_settlements(int(_day_start(30).timestamp()), to, 10))
     except ProofBridgeError:
         stl = []
+    # Balance the merchant can expect to be settled: captured in the last 30 days, less fees and tax,
+    # less what has already been settled (test mode never settles, so this is the unsettled total).
+    try:
+        month = _cached("overview:payments30", 30, lambda: get_razorpay().list_payments(int(_day_start(29).timestamp()), to, 100))
+    except ProofBridgeError:
+        month = items
+    balance = sum(p["amount"] - (p.get("fee") or 0) for p in month if p.get("status") == "captured") \
+        - sum(s_.get("amount", 0) for s_ in stl if s_.get("status") == "processed")
     disputes = _disputes_by_payment()
     open_disputes = [d for d in _disputes() if d.get("status") == "open"]
     return {
@@ -117,6 +125,7 @@ def overview(db: Session) -> dict:
         "week": {"amount": sum(d["amount"] for d in days), "count": sum(d["count"] for d in days), "days": days},
         "recent": [payment_view(p, disputes) for p in items[:5]],
         "last_settlement": settlement_view(stl[0]) if stl else None,
+        "balance": max(0, balance),
         "disputes_open": len(open_disputes),
         "unread_notifications": db.scalar(select(func.count(Notification.id)).where(
             Notification.channel == "in_app", Notification.read_at.is_(None))) or 0,
