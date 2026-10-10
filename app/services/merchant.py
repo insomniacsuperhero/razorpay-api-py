@@ -165,10 +165,19 @@ def products() -> dict:
 def disputes_list(db: Session) -> dict:
     counts = dict(db.execute(select(EvidenceItem.dispute_id, func.count(EvidenceItem.id))
                              .where(EvidenceItem.removed_at.is_(None)).group_by(EvidenceItem.dispute_id)).all())
+    proofs: dict[str, list[dict]] = {}
+    for i in db.scalars(select(EvidenceItem).where(EvidenceItem.removed_at.is_(None), EvidenceItem.status == "ready")
+                        .order_by(EvidenceItem.created_at)):
+        proofs.setdefault(i.dispute_id, []).append(
+            {"label": i.document_type or i.original_filename, "verdict": i.verdict, "field": i.final_field})
     items = []
     for d in sorted(_disputes(), key=lambda d: -d.get("created_at", 0)):
+        ev = d.get("evidence") or {}
         items.append({**dispute_summary(d), "reason_label": rule_for(d.get("reason_code", "")).reason_label,
                       "evidence_files": counts.get(d["id"], 0),
+                      "proofs": proofs.get(d["id"], []),
+                      "response": {"summary": ev.get("summary"), "amount": ev.get("amount"),
+                                   "submitted_at": ev.get("submitted_at")} if ev.get("submitted_at") else None,
                       "created_at": datetime.fromtimestamp(int(d.get("created_at", 0)), tz=IST).isoformat()})
     return {"items": items}
 
