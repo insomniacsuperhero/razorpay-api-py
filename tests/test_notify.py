@@ -163,3 +163,13 @@ def test_open_session_only_when_enabled(env):
         assert client.get(f"/api/v1/disputes/{did}", headers=auth).status_code == 200
     finally:
         _settings(**old)
+
+
+def test_opening_a_dispute_clears_only_its_own_alert(env):
+    client, *_ = env
+    first, auth, _ = seed_and_login(client)
+    second, auth2, _ = seed_and_login(client, reason="not_as_described")
+    assert client.post(f"/api/v1/merchant/notifications/read?dispute_id={first}", headers=auth).status_code == 204
+    items = client.get("/api/v1/merchant/notifications", headers=auth).json()["items"]
+    read = {n["dispute_id"]: n["read"] for n in items if n["channel"] == "in_app"}
+    assert read[first] is True and read[second] is False

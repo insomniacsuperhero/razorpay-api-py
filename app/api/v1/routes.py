@@ -214,8 +214,12 @@ def merchant_notifications(limit: int = 50, db: Session = Depends(get_db)):
 
 
 @merchant.post("/notifications/read", status_code=204)
-def merchant_notifications_read(db: Session = Depends(get_db)):
-    for n in db.scalars(select(Notification).where(Notification.channel == "in_app", Notification.read_at.is_(None))):
+def merchant_notifications_read(dispute_id: str | None = None, db: Session = Depends(get_db)):
+    """Marks in-app alerts read: all of them, or only one dispute's when the seller opens that dispute."""
+    q = select(Notification).where(Notification.channel == "in_app", Notification.read_at.is_(None))
+    if dispute_id:
+        q = q.where(Notification.dispute_id == dispute_id)
+    for n in db.scalars(q):
         n.read_at = datetime.now(timezone.utc)
     db.commit()
     return Response(status_code=204)
